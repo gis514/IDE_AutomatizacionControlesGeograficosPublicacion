@@ -7,7 +7,6 @@ import errno
 import argparse
 import csv 
 import json
-#import datetime
 import gettext
 import logging
 
@@ -55,6 +54,26 @@ def qgsInit(pp):
 def qgsExit(qgs):
     ''' Exit PyQGIS. '''
     qgs.exitQgis()
+
+def create_indexes(l, u, args):    
+    ''' Return list and dictionary with spatial indexes. '''
+    logger.info('{}.'.format(_('Constructing spatial indexes...')))
+    
+    dic_featid = {}    
+    l_ind = {}
+
+    for i in l:        
+        u.setDataSource(args.dbschema, i, "geom")
+        vector_layer = QgsVectorLayer(u.uri(False), i, "postgres") 
+        it_features = vector_layer.getFeatures()
+        index = QgsSpatialIndex(it_features)
+        l_ind[i] = index
+
+        all_features = {feature.id(): feature['id'] for feature in vector_layer.getFeatures()}        
+        dic_featid[i] = all_features
+
+    logger.info('{}.'.format(_('Finished contruction of spatial indexes...')))
+    return l_ind, dic_featid    
 
 def appendRowsToDetailOutputFile(f, rows):    
     with open(f, 'a', newline = '') as csvfile:
@@ -327,24 +346,6 @@ def interseccion_todas_capas(c, f, lc, l_index, args):
                         return True        
     return False        
 
-def createIndexs(l, u, args):
-    print("Creando indices...")
-    dic_featid = {}    
-    l_ind = {}
-
-    for i in l:        
-        u.setDataSource(args.dbschema, i, "geom")
-        capa_cargada = QgsVectorLayer(u.uri(False), i, "postgres") 
-        iterador_features_cargado = capa_cargada.getFeatures()
-        index = QgsSpatialIndex(iterador_features_cargado)
-        l_ind[i] = index
-
-        all_features = {feature.id(): feature['id'] for feature in capa_cargada.getFeatures()}        
-        dic_featid[i] = all_features
-
-    print("Finalizo creacion de indices.")
-    return l_ind, dic_featid
-
 def control_4(capa_4, uri, indices, args, nam_sal, lista_intersectar):    
     uri.setDataSource(args.dbschema, capa_4, "geom")
     capa_eje = QgsVectorLayer(uri.uri(False), capa_4, "postgres")   
@@ -415,6 +416,14 @@ def intersectar_capa(c, g_f, altura_pol, writer, c_original, fea_original, uri, 
             else:
                 writer.writerow([geom_interseccion.wkbType()])                			
 
+def get_geometry_layer(dir_layer):
+    ''' Return the geometry of one feature of a layer. '''    
+    vector_layer = QgsVectorLayer(args.rem, 'layer', "ogr")	        
+    it_features = vector_layer.getFeatures()
+    for feature in it_features:
+        f = feature
+    return f.geometry()  
+
 def load_config(dir_file_conf):
     ''' Return the json configuration of the control. '''
     with open(dir_file_conf) as json_data:
@@ -430,7 +439,7 @@ if __name__ == '__main__':
     tolerancia_poligono = args.t2
 
     # start qgis
-    qgs = qgsInit(args.q)
+    qgs = qgsInit(args.dirqgis)
 
     # uri conection db
     uri = QgsDataSourceUri()
@@ -439,45 +448,36 @@ if __name__ == '__main__':
     # load configuration
     f_config = load_config(args.conf)
 
-    # Cargo linea de remesa    
-    capa_remesa_l = QgsVectorLayer(args.rem, "limite_remesa", "ogr")	        
-    it_remesa = capa_remesa_l.getFeatures()
-    for linea_remesa in it_remesa:
-        f_rem = linea_remesa
-    geometria_remesa = f_rem.geometry()    
-
-    lista_indices = f_config["indices"]
-        
-    lista_control1 = f_config["flujo"]
-    lista_control23 = f_config["endorreicas"]
-    lista_control4 =  f_config["altura_area"]
-    l_continuidad = f_config["continuidad"]
-
+    # initialization of variables
     l_ind = {}
-    d_feat = {}
-    l_ind, d_feat = createIndexs(lista_indices, uri, args)
+    d_feat = {}                    
+    l_continuidad = f_config["continuidad"]
+    consignment_geometry = get_geometry_layer(args.rem)
 
-    for capa in lista_control1:
-        fecha = get_time().strftime("%Y%m%d_%H%M%S_")
-        print ("Controlando capa:", capa)
-        uri.setDataSource(args.dbschema, capa, "geom")
-        capa_verificar = QgsVectorLayer(uri.uri(False), capa, "postgres")
-        #capa_verificar = QgsVectorLayer(os.path.join("C:", os.path.sep, "Users", "Gonzalo", "Downloads", "IDEUy", "canal_l_chico.shp" ), capa, "ogr")
-        nombre_salida = args.salida + '/' + args.dbschema + '_'  + fecha + 'Control_AlturaVertices_' + capa +'.csv'
-        cotas, endorreicas = control(capa_verificar, capa, lista_control23, args.rem, uri, l_ind, nombre_salida, args, d_feat, l_continuidad)     
-        r_cota = es_cota(capa_verificar, capa, cotas, lista_control23, l_ind, args)
-        r_endo = es_endorreica(capa, endorreicas, uri, geometria_remesa, l_ind, lista_control23, args)
+    l_ind, d_feat = create_indexes(f_config["indices"], uri, args)
+
+    # iteration of layers to verify control 1, 2, 3
+    for name_l_flow in f_config["flujo"]:
+        date_time = get_time().strftime("%Y%m%d_%H%M%S_")
+        logger.info('{}: {}.'.format(_('Control 1,2,3: Verifing layer'), name_l_flow))        
+        uri.setDataSource(args.dbschema, name_l_flow, "geom")
+        layer_check = QgsVectorLayer(uri.uri(False), name_l_flow, "postgres")        
+        result_name = args.salida + '/' + args.dbschema + '_'  + date_time + 'Control_Vertex_Height_' + name_l_flow +'.csv'
+        cotas, endorreicas = control(layer_check, name_l_flow, f_config["endorreicas"], args.rem, uri, l_ind, result_name, args, d_feat, l_continuidad)     
+        r_cota = es_cota(layer_check, name_l_flow, cotas, f_config["endorreicas"], l_ind, args)
+        r_endo = es_endorreica(name_l_flow, endorreicas, uri, consignment_geometry, l_ind, f_config["endorreicas"], args)
         
-        appendRowsToDetailOutputFile(nombre_salida, r_cota)        
-        appendRowsToDetailOutputFile(nombre_salida, r_endo)
+        appendRowsToDetailOutputFile(result_name, r_cota)        
+        appendRowsToDetailOutputFile(result_name, r_endo)
 
-        control_1(capa, uri, args, nombre_salida)
+        control_1(name_l_flow, uri, args, result_name)
 
-    for capa in lista_control4:
-        print ("Controlando capa:", capa)
-        fecha = get_time().strftime("%Y%m%d_%H%M%S_")
-        nombre_salida = args.salida + '/' + args.dbschema + '_' + fecha + 'Control_AlturaPoligono_' + capa +'.csv'
-        control_4(capa, uri, l_ind, args, nombre_salida, lista_control1)
+    # iteration of layers to verify control 4
+    for name_l_constant_height in f_config["altura_area"]:        
+        date_time = get_time().strftime("%Y%m%d_%H%M%S_")
+        logger.info('{}: {}.'.format(_('Control 4: Verifing layer'), name_l_constant_height))        
+        result_name = args.salida + '/' + args.dbschema + '_' + date_time + 'Control_Polygon_Height_' + name_l_constant_height +'.csv'
+        control_4(name_l_constant_height, uri, l_ind, args, result_name, f_config["flujo"])
 
     logger.info('{}.'.format(_('End')))
     # exit qgis
